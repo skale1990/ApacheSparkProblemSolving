@@ -2,8 +2,11 @@ package com.som.spark.learning;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.collect.ImmutableList;
 import org.apache.spark.SparkContext;
+import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.function.MapPartitionsFunction;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.SparkSession;
 import org.apache.log4j.Level;
@@ -33,6 +36,7 @@ import static org.apache.spark.sql.functions.*;
 import org.apache.spark.sql.types.*;
 import org.apache.spark.sql.*;
 import scala.Serializable;
+import scala.collection.Iterator;
 import scala.collection.JavaConversions;
 import scala.collection.JavaConverters;
 import scala.collection.Seq;
@@ -547,6 +551,90 @@ public class JavaProblemSolverTest implements Serializable {
         dataset1.show();
     }
 
+    // ############################################################################################################
+
+    @Test
+    public void test62308169() {
+        Dataset<Row> df = spark.range(2).withColumn("value", lit(2));
+        df.show(false);
+        df.printSchema();
+
+        /**
+         * +---+-----+
+         * |id |value|
+         * +---+-----+
+         * |0  |2    |
+         * |1  |2    |
+         * +---+-----+
+         *
+         * root
+         *  |-- id: long (nullable = false)
+         *  |-- value: integer (nullable = false)
+         */
+        Map<String, String> map = new HashMap<>();
+        for(String column:df.columns())
+            map.put(column, "sum");
+
+        List<Column> cols = map.entrySet().stream().map(c -> expr(String.format("%s(%s) as %s", c.getValue(), c.getKey(), c.getKey())))
+                .collect(Collectors.toList());
+
+
+        df.agg(cols.get(0), toScalaSeq(cols.subList(1, cols.size()))).show(false);
+        /**
+         * +---+-----+
+         * |id |value|
+         * +---+-----+
+         * |1  |4    |
+         * +---+-----+
+         */
+    }
+
+    // ############################################################################################################
+
+    @Test
+    public void test62344764() {
+        List<Integer> lst = Arrays.asList(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20);
+        Dataset<Integer> DF = spark.createDataset(lst, Encoders.INT());
+        System.out.println(DF.javaRDD().getNumPartitions());
+        MapPartitionsFunction<Integer, Integer> f =
+                it -> ImmutableList.of(JavaConverters.asScalaIteratorConverter(it).asScala().length()).iterator();
+        Dataset<Integer> integerDataset = DF.repartition(3).mapPartitions(f,
+                Encoders.INT());
+        integerDataset
+                .show(false);
+        /**
+         * 2
+         * +-----+
+         * |value|
+         * +-----+
+         * |6    |
+         * |8    |
+         * |6    |
+         * +-----+
+         */
+
+        JavaRDD<Integer> mappartRdd = DF.repartition(3).javaRDD().mapPartitions(it->  Arrays.asList(JavaConversions.asScalaIterator(it).length()).iterator());
+
+//        def createDataFrame(rowRDD: JavaRDD[Row], schema: StructType): DataFrame = {
+        StructType schema = new StructType()
+                .add(new StructField("value", DataTypes.IntegerType, true, Metadata.empty()));
+        Dataset<Row> df = spark.createDataFrame(mappartRdd.map(RowFactory::create), schema);
+        df.show(false);
+        df.printSchema();
+
+        /**
+         * +-----+
+         * |value|
+         * +-----+
+         * |6    |
+         * |8    |
+         * |6    |
+         * +-----+
+         *
+         * root
+         *  |-- value: integer (nullable = true)
+         */
+    }
 
 
 }
