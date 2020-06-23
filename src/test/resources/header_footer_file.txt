@@ -1,0 +1,8 @@
+04/11/2020
+
+name;age;id
+asdildsh;12;1
+ram;13;2
+oma;23;3
+radahea;14;4
+hellohow

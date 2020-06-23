@@ -6,8 +6,13 @@ import com.google.common.collect.ImmutableList;
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.function.ForeachFunction;
+import org.apache.spark.api.java.function.MapFunction;
 import org.apache.spark.api.java.function.MapPartitionsFunction;
 import org.apache.spark.broadcast.Broadcast;
+import org.apache.spark.ml.classification.MultilayerPerceptronClassificationModel;
+import org.apache.spark.ml.classification.MultilayerPerceptronClassifier;
+import org.apache.spark.rdd.RDD;
 import org.apache.spark.sql.SparkSession;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
@@ -25,7 +30,9 @@ import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder;
 import org.apache.spark.sql.catalyst.encoders.RowEncoder;
 import org.apache.spark.sql.catalyst.plans.RightOuter;
 import org.apache.spark.sql.expressions.UserDefinedFunction;
+import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.types.StructType;
+import org.apache.spark.util.LongAccumulator;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -35,7 +42,10 @@ import org.apache.spark.sql.expressions.Window;
 import static org.apache.spark.sql.functions.*;
 import org.apache.spark.sql.types.*;
 import org.apache.spark.sql.*;
+import scala.Function1;
 import scala.Serializable;
+import scala.Tuple4;
+import scala.Tuple5;
 import scala.collection.Iterator;
 import scala.collection.JavaConversions;
 import scala.collection.JavaConverters;
@@ -636,5 +646,233 @@ public class JavaProblemSolverTest implements Serializable {
          */
     }
 
+    // ############################################################################################################
+
+    @Test
+    public void test62398704() {
+        String data = "ID | branch | name    | role | age\n" +
+                "1  | HQ     | Harry   | DEV  | 24\n" +
+                "1  | Berlin | Harry   | QA   | 24\n" +
+                "1  | Hungary| Harry   | BA   | 24\n" +
+                "2  | HQ     | Chris   | Prod | 39\n" +
+                "2  | Chime  | Chris   | Prod | 39\n" +
+                "2  | Cornell| Chris   | Acc  | 39\n" +
+                "2  | Chappel| Chris   |      | 39";
+
+        List<String> list1 = Arrays.stream(data.split(System.lineSeparator()))
+                .map(s -> Arrays.stream(s.split("\\|"))
+                        .map(s1 -> s1.replaceAll("^[ \t]+|[ \t]+$", ""))
+                        .collect(Collectors.joining(","))
+                )
+                .collect(Collectors.toList());
+
+        Dataset<Row> dataset = spark.read()
+                .option("header", true)
+                .option("inferSchema", true)
+                .option("sep", ",")
+                .csv(spark.createDataset(list1, Encoders.STRING()));
+        dataset.show(false);
+        dataset.printSchema();
+
+        /**
+         * +---+-------+-----+----+---+
+         * |ID |branch |name |role|age|
+         * +---+-------+-----+----+---+
+         * |1  |HQ     |Harry|DEV |24 |
+         * |1  |Berlin |Harry|QA  |24 |
+         * |1  |Hungary|Harry|BA  |24 |
+         * |2  |HQ     |Chris|Prod|39 |
+         * |2  |Chime  |Chris|Prod|39 |
+         * |2  |Cornell|Chris|Acc |39 |
+         * |2  |Chappel|Chris|null|39 |
+         * +---+-------+-----+----+---+
+         *
+         * root
+         *  |-- ID: integer (nullable = true)
+         *  |-- branch: string (nullable = true)
+         *  |-- name: string (nullable = true)
+         *  |-- role: string (nullable = true)
+         *  |-- age: integer (nullable = true)
+         */
+
+        dataset.withColumn("role", collect_set(
+                when(trim(col("role")).equalTo(lit("")), lit(null)).otherwise(col("role"))
+        ).over(Window.partitionBy("ID")))
+                .where("branch='HQ'")
+                .show(false);
+        /**
+         * +---+------+-----+-------------+---+
+         * |ID |branch|name |role         |age|
+         * +---+------+-----+-------------+---+
+         * |2  |HQ    |Chris|[Prod, Acc]  |39 |
+         * |1  |HQ    |Harry|[QA, BA, DEV]|24 |
+         * +---+------+-----+-------------+---+
+         */
+    }
+    // ############################################################################################################
+
+    @Test
+    public void test62410606() {
+        spark.sql("select ID from values ('1-1'), ('10') T(ID) where ID NOT LIKE '%-%'")
+                .show(false);
+        /**
+         * +---+
+         * |ID |
+         * +---+
+         * |10 |
+         * +---+
+         */
+    }
+    // ############################################################################################################
+
+    @Test
+    public void test62423748() {
+        String data = "   e_key|f_timestamp_day|                 key|               value|f_country|f_os|received_date\n" +
+                "  Tryout|     2020-04-01|      item_guid_list|            a^a^a^b |       FR| iOS|   2020-04-01\n" +
+                "  Tryout|     2020-04-01|            sku_list|         c^c^d^e^f^f|       FR| iOS|   2020-04-01";
+
+        List<String> list1 = Arrays.stream(data.split(System.lineSeparator()))
+                .map(s -> Arrays.stream(s.split("\\|"))
+                        .map(s1 -> s1.replaceAll("^[ \t]+|[ \t]+$", ""))
+                        .collect(Collectors.joining(","))
+                )
+                .collect(Collectors.toList());
+
+        Dataset<Row> dataset = spark.read()
+                .option("header", true)
+                .option("inferSchema", true)
+                .option("sep", ",")
+                .option("nullValue", "null")
+                .csv(spark.createDataset(list1, Encoders.STRING()));
+        dataset.show(false);
+        dataset.printSchema();
+        /**
+         * +------+-------------------+--------------+-----------+---------+----+-------------------+
+         * |e_key |f_timestamp_day    |key           |value      |f_country|f_os|received_date      |
+         * +------+-------------------+--------------+-----------+---------+----+-------------------+
+         * |Tryout|2020-04-01 00:00:00|item_guid_list|a^a^a^b    |FR       |iOS |2020-04-01 00:00:00|
+         * |Tryout|2020-04-01 00:00:00|sku_list      |c^c^d^e^f^f|FR       |iOS |2020-04-01 00:00:00|
+         * +------+-------------------+--------------+-----------+---------+----+-------------------+
+         *
+         * root
+         *  |-- e_key: string (nullable = true)
+         *  |-- f_timestamp_day: timestamp (nullable = true)
+         *  |-- key: string (nullable = true)
+         *  |-- value: string (nullable = true)
+         *  |-- f_country: string (nullable = true)
+         *  |-- f_os: string (nullable = true)
+         *  |-- received_date: timestamp (nullable = true)
+         */
+
+        dataset.withColumn("value", explode(array_distinct(split(col("value"), "\\^"))))
+                .show(false);
+        /**
+         * +------+-------------------+--------------+-----+---------+----+-------------------+
+         * |e_key |f_timestamp_day    |key           |value|f_country|f_os|received_date      |
+         * +------+-------------------+--------------+-----+---------+----+-------------------+
+         * |Tryout|2020-04-01 00:00:00|item_guid_list|a    |FR       |iOS |2020-04-01 00:00:00|
+         * |Tryout|2020-04-01 00:00:00|item_guid_list|b    |FR       |iOS |2020-04-01 00:00:00|
+         * |Tryout|2020-04-01 00:00:00|sku_list      |c    |FR       |iOS |2020-04-01 00:00:00|
+         * |Tryout|2020-04-01 00:00:00|sku_list      |d    |FR       |iOS |2020-04-01 00:00:00|
+         * |Tryout|2020-04-01 00:00:00|sku_list      |e    |FR       |iOS |2020-04-01 00:00:00|
+         * |Tryout|2020-04-01 00:00:00|sku_list      |f    |FR       |iOS |2020-04-01 00:00:00|
+         * +------+-------------------+--------------+-----+---------+----+-------------------+
+         */
+    }
+
+    // ############################################################################################################
+
+    @Test
+    public void test62424833() {
+        LongAccumulator longAccum = spark.sparkContext().longAccumulator("my accum");
+        Dataset<Row> df = spark.range(100).withColumn("x", lit("x"));
+
+        //access in map
+        df.map((MapFunction<Row, Row>) row -> {
+            longAccum.add(1);
+            return  row;
+        }, RowEncoder.apply(df.schema()))
+                .count();
+
+        // accumulator value
+        System.out.println(longAccum.value()); // 100
+
+        longAccum.reset();
+        // access in for each
+        df.foreach((ForeachFunction<Row>) row -> longAccum.add(1));
+
+        // accumulator value
+        System.out.println(longAccum.value()); // 100
+
+        longAccum.reset();
+        /**
+         * streaming dataframe from csv dir
+         * test.csv
+         * --------
+         * csv
+         * id,name
+         * 1,bob
+         * 2,smith
+         * 3,jam
+         * 4,dwayne
+         * 5,mike
+         */
+        String fileDir = getClass().getResource("/" + "csv").getPath();
+        StructType schema = new StructType()
+                .add(new StructField("id", DataTypes.LongType, true, Metadata.empty()))
+                .add(new StructField("name", DataTypes.StringType, true, Metadata.empty()));
+        Dataset<Row> json = spark.readStream().schema(schema).option("header", true).csv(fileDir);
+
+        StreamingQuery streamingQuery = json
+                .map((MapFunction<Row, Row>) row -> {
+                    longAccum.add(1);
+                    return row;
+                }, RowEncoder.apply(df.schema()))
+                .writeStream()
+                .format("console").start();
+        streamingQuery.processAllAvailable();
+
+        // accumulator value
+        System.out.println(longAccum.value()); // 5
+
+    }
+
+    // ############################################################################################################
+
+    public static MultilayerPerceptronClassificationModel trainModel_MPC(SparkSession session, JavaRDD<LabeledPoint> data)
+    {
+        // specify layers for the neural network:
+        // input layer of size 4 (features), two intermediate of size 5 and 4
+        // and output of size 3 (classes)
+
+        int[] layers = {4, 5, 5, 3};
+        MultilayerPerceptronClassifier model = new MultilayerPerceptronClassifier().setLayers(layers)
+                .setSeed(System.currentTimeMillis()).setBlockSize(128).setMaxIter(200);
+
+        Dataset<Row> dataset = session.createDataFrame(data.rdd(), LabeledPoint.class);
+
+        return model.fit(dataset);
+
+    }
+
+    @Test
+    public void test62476206() {
+        // ref https://databricks-prod-cloudfront.cloud.databricks.com/public/4027ec902e239c93eaaa8714f173bcfc/3741049972324885/1019862370390522/4413065072037724/latest.html
+
+        Tuple5<PipelineModel, Pipeline, CrossValidatorModel, Dataset<Row>, Dataset<Row>> tuple5 =
+                new ProblemSolverMay2020Test().mlOnIrisData();
+        // create LabelPoint
+        CrossValidatorModel crossValidatorModel = tuple5._3();
+        Dataset<Row> trainData =  tuple5._4();
+        JavaRDD<LabeledPoint> labeledPointJavaRDD = crossValidatorModel.transform(trainData).toJavaRDD()
+                .map(r -> LabeledPoint.apply(r.getAs("indexedLabel"), r.getAs("indexedFeatures")));
+        MultilayerPerceptronClassificationModel perceptronClassificationModel = trainModel_MPC(spark, labeledPointJavaRDD);
+
+        Dataset<Row> testData =  tuple5._5();
+        Dataset<Row> rowDataset = crossValidatorModel.transform(trainData)
+                .selectExpr("indexedLabel as label", "indexedFeatures as features");
+        perceptronClassificationModel.transform(rowDataset)
+        .show(false);
+    }
 
 }

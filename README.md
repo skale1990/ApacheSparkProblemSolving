@@ -9,6 +9,6 @@ Please take a look at the testcases created for each **StackOverflow problem**. 
 
 Please take a look at the below testNg classes-
 
-1. StackOverflowProblemSolving/src/test/java/com/som/spark/learning/JavaProblemSolverTest.java
-2. StackOverflowProblemSolving/src/test/java/com/som/spark/learning/ProblemSolverTestMay2020.scala
-3. StackOverflowProblemSolving/src/test/java/com/som/spark/learning/ProblemSolverTestMay2020.scala
+1. src/test/java/com/som/spark/learning/JavaProblemSolverTest.java
+2. src/test/java/com/som/spark/learning/ProblemSolverMay2020Test.scala
+3. src/test/java/com/som/spark/learning/ProblemSolverMay2020Test.scala
