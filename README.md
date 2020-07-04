@@ -11,4 +11,5 @@ Please take a look at the below testNg classes-
 
 1. src/test/java/com/som/spark/learning/JavaProblemSolverTest.java
 2. src/test/java/com/som/spark/learning/ProblemSolverMay2020Test.scala
-3. src/test/java/com/som/spark/learning/ProblemSolverMay2020Test.scala
+3. src/test/java/com/som/spark/learning/ProblemSolverJun2020Test.scala
+4. src/test/java/com/som/spark/learning/ProblemSolverJul2020Test.scala

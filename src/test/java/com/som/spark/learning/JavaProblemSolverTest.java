@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
 import org.apache.spark.SparkContext;
+import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.ForeachFunction;
@@ -44,6 +45,7 @@ import org.apache.spark.sql.types.*;
 import org.apache.spark.sql.*;
 import scala.Function1;
 import scala.Serializable;
+import scala.Tuple2;
 import scala.Tuple4;
 import scala.Tuple5;
 import scala.collection.Iterator;
@@ -115,7 +117,6 @@ public class JavaProblemSolverTest implements Serializable {
                 .csv(spark.createDataset(list, Encoders.STRING()));
         df1.show();
         df1.printSchema();
-
         /**
          * +---+-----+-----+-----+-----+-----+
          * | id|Col_1|Col_2|Col_3|Col_4|Col_5|
@@ -854,6 +855,7 @@ public class JavaProblemSolverTest implements Serializable {
         return model.fit(dataset);
 
     }
+    // ############################################################################################################
 
     @Test
     public void test62476206() {
@@ -873,6 +875,110 @@ public class JavaProblemSolverTest implements Serializable {
                 .selectExpr("indexedLabel as label", "indexedFeatures as features");
         perceptronClassificationModel.transform(rowDataset)
         .show(false);
+    }
+
+    // ############################################################################################################
+    @Test
+    public void test62586603() {
+
+        StructType schema = new StructType()
+                .add(new StructField("id", DataTypes.IntegerType, true, Metadata.empty()))
+                .add(new StructField("name", DataTypes.StringType, true, Metadata.empty()));
+
+        JavaRDD<Tuple2<Row, Row>> tuple2JavaRDD = new JavaSparkContext(spark.sparkContext())
+                .parallelize(
+                        Arrays.asList(Tuple2.apply(RowFactory.create(1), RowFactory.create("a")),
+                                Tuple2.apply(RowFactory.create(2), RowFactory.create("b")))
+                );
+        JavaRDD<Row> rowJavaRDD1 = tuple2JavaRDD.map(t -> Row$.MODULE$.merge(
+                toScalaSeq(Arrays.asList(t._1, t._2))
+        ));
+        Dataset<Row> df1 = spark.createDataFrame(rowJavaRDD1, schema);
+        df1.show(false);
+        df1.printSchema();
+        /**
+         * +---+----+
+         * |id |name|
+         * +---+----+
+         * |1  |a   |
+         * |2  |b   |
+         * +---+----+
+         *
+         * root
+         *  |-- id: integer (nullable = true)
+         *  |-- name: string (nullable = true)
+         */
+
+        JavaRDD<Tuple2<Integer, String>> resultRDD = new JavaSparkContext(spark.sparkContext())
+                .parallelize(Arrays.asList(Tuple2.apply(1, "a"), Tuple2.apply(2, "b")));
+        JavaRDD<Row> rowJavaRDD = resultRDD.map(Row$.MODULE$::fromTuple);
+        Dataset<Row> dataFrame = spark.createDataFrame(rowJavaRDD, schema);
+        dataFrame.show(false);
+        dataFrame.printSchema();
+        /**
+         * +---+----+
+         * |id |name|
+         * +---+----+
+         * |1  |a   |
+         * |2  |b   |
+         * +---+----+
+         *
+         * root
+         *  |-- id: integer (nullable = true)
+         *  |-- name: string (nullable = true)
+         */
+    }
+
+    // ############################################################################################################
+
+    StructType getSchema(){
+        StructField[] structFields = new StructField[]{
+                new StructField("id", DataTypes.LongType, true, Metadata.empty()),
+                new StructField("name", DataTypes.StringType, true, Metadata.empty()),
+                new StructField("cat", DataTypes.StringType, true, Metadata.empty()),
+                new StructField("tag", DataTypes.createArrayType(DataTypes.StringType), true, Metadata.empty())
+
+        };
+        return new StructType(structFields);
+    }
+    @Test
+    public void test62664789() {
+        Dataset<Row> dataFrame = spark.createDataFrame(Arrays.asList(
+                RowFactory.create(1L, "foo", "cat1", Arrays.asList("tag1", "tag2"))
+        ), getSchema());
+        dataFrame.show(false);
+        dataFrame.printSchema();
+        /**
+         * +---+----+----+------------+
+         * |id |name|cat |tag         |
+         * +---+----+----+------------+
+         * |1  |foo |cat1|[tag1, tag2]|
+         * +---+----+----+------------+
+         *
+         * root
+         *  |-- id: long (nullable = true)
+         *  |-- name: string (nullable = true)
+         *  |-- cat: string (nullable = true)
+         *  |-- tag: array (nullable = true)
+         *  |    |-- element: string (containsNull = true)
+         */
+        Dataset<DealFeedSchema> dealFeedSchemaDataset = dataFrame.as(Encoders.bean(DealFeedSchema.class));
+        dealFeedSchemaDataset.show(false);
+        dealFeedSchemaDataset.printSchema();
+        /**
+         * +---+----+----+------------+
+         * |id |name|cat |tag         |
+         * +---+----+----+------------+
+         * |1  |foo |cat1|[tag1, tag2]|
+         * +---+----+----+------------+
+         *
+         * root
+         *  |-- id: long (nullable = true)
+         *  |-- name: string (nullable = true)
+         *  |-- cat: string (nullable = true)
+         *  |-- tag: array (nullable = true)
+         *  |    |-- element: string (containsNull = true)
+         */
     }
 
 }

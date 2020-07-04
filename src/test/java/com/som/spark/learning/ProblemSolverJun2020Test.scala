@@ -4,12 +4,13 @@ import java.lang.reflect.Method
 import java.text.SimpleDateFormat
 import java.time.format.DateTimeFormatterBuilder
 import java.time.temporal.ChronoField
+import java.util.concurrent.TimeUnit
 import java.util.{Collections, Locale}
 
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.SparkFiles
 import org.apache.spark.ml.{Pipeline, PipelineModel, Transformer}
-import org.apache.spark.ml.classification.RandomForestClassifier
+import org.apache.spark.ml.classification.{MultilayerPerceptronClassifier, RandomForestClassifier}
 import org.apache.spark.ml.evaluation.MulticlassClassificationEvaluator
 import org.apache.spark.ml.feature._
 import org.apache.spark.sql._
@@ -25,12 +26,13 @@ import org.apache.spark.mllib.util.MLUtils
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalog.{Database, Table}
 import org.apache.spark.sql.catalyst.ScalaReflection
-import org.apache.spark.sql.catalyst.expressions.{GenericRowWithSchema, Rand}
+import org.apache.spark.sql.catalyst.encoders.RowEncoder
+import org.apache.spark.sql.catalyst.expressions.{GenericRowWithSchema, MonthsBetween, Rand}
 import org.apache.spark.sql.catalyst.expressions.aggregate.ApproximatePercentile
-import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, GenericArrayData, MapData}
 import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions.{first, _}
 import org.apache.spark.sql.types._
+import org.joda.time.Months
 import org.json4s.JsonAST
 
 import scala.collection.{JavaConverters, mutable}
@@ -3076,18 +3078,1095 @@ class ProblemSolverJun2020Test extends Serializable {
       * |k1 |v1             |[test1, 2020-06-23T14:51:17Z]|
       * +---+---------------+-----------------------------+
       */
-    //    ExampleDataFrame
-//      //brings back data fields with types
-//      .schema
-//      //Currently returning empty but works for StringType
-//      .filter(_.dataType.isInstanceOf[StructType])
-//      //fetch timestamp fields from struct
-//      .map(_.asInstanceOf[StructType].filter(_.dataType == TimestampType))
-//      //Tranforms all timestamp longs to yyyy-MM-dd'T'HH:mm:ss'Z' format
-//      .foldLeft(ExampleDataFrame)((df, colName) => df.withColumn(colName, date_format(col(colName), isoDateFormatter)))
-//      .show(false)
-    println(Map("x" -> 10).getOrElse("y", "y not found"))
-    println(Map("x" -> 10).getOrElse("y", () => throw new RuntimeException("y not found")))
+
+    ExampleDataFrame.schema
+      .filter(_.dataType.isInstanceOf[StructType])
+      .flatMap(s => s.dataType.asInstanceOf[StructType]
+        .filter(_.dataType == TimestampType)
+        .map(f => s"${s.name}.${f.name}")
+      )
+      .foldLeft(ExampleDataFrame)((df, colName) => df.withColumn(colName, date_format(col(colName), isoDateFormatter)))
+      .show(false)
+
+    /**
+      * +---+---------------+----------------------------+--------------------+
+      * |key|contractVersion|metaData                    |metaData.DateUtc    |
+      * +---+---------------+----------------------------+--------------------+
+      * |k1 |v1             |[test1, 2020-06-23 21:40:36]|2020-06-23T21:40:36Z|
+      * +---+---------------+----------------------------+--------------------+
+      */
+
+  }
+
+  // ############################################################################################################
+
+  @Test
+  def test62533896(): Unit = {
+    val data =
+      """
+        |column_1  | column_2 | column_3
+        |    -     |     -    |     -
+        |    1     |     -    |     -
+        |    -     |     1    |     -
+        |    -     |     -    |     1
+        |    1     |     1    |     -
+        |    1     |     1    |     1
+        |    1     |     -    |     -
+        |    -     |     1    |     1
+      """.stripMargin
+    val stringDS = data.split(System.lineSeparator())
+      .map(_.split("\\|").map(_.replaceAll("""^[ \t]+|[ \t]+$""", "")).mkString(","))
+      .toSeq.toDS()
+    val df = spark.read
+      .option("sep", ",")
+      .option("inferSchema", "true")
+      .option("header", "true")
+      .option("nullValue", "-")
+      .csv(stringDS)
+    df.printSchema()
+    df.show(false)
+    val totalCols = df.columns.length
+    df.withColumn("col_collect", size(array(df.columns.map(col(_)): _*)))
+      .show(false)
+  }
+
+  // ############################################################################################################
+
+  @Test
+  def test62536484(): Unit = {
+    val data =
+      """
+        |Alice;Bob;Carol
+        |       12;13;14
+        |           5;;7
+        |           1;;3
+        |            ;;3
+      """.stripMargin
+    val stringDS = data.split(System.lineSeparator())
+      .map(_.split("\\;").map(_.replaceAll("""^[ \t]+|[ \t]+$""", "")).mkString(";"))
+      .toSeq.toDS()
+    val df = spark.read
+      .option("sep", ";")
+      .option("inferSchema", "true")
+      .option("header", "true")
+      .option("nullValue", "null")
+      .csv(stringDS)
+    df.printSchema()
+    df.show(false)
+    /**
+      * root
+      * |-- Alice: integer (nullable = true)
+      * |-- Bob: integer (nullable = true)
+      * |-- Carol: integer (nullable = true)
+      *
+      * +-----+----+-----+
+      * |Alice|Bob |Carol|
+      * +-----+----+-----+
+      * |12   |13  |14   |
+      * |5    |null|7    |
+      * |1    |null|3    |
+      * |null |null|3    |
+      * +-----+----+-----+
+      */
+
+    val columns = df.columns.map(c => expr(s"named_struct('name', '$c', 'values',  collect_list($c))"))
+    df.select(array(columns: _*).as("array"))
+      .selectExpr("inline_outer(array)")
+      .show(false)
+    /**
+      * +-----+-------------+
+      * |name |values       |
+      * +-----+-------------+
+      * |Alice|[12, 5, 1]   |
+      * |Bob  |[13]         |
+      * |Carol|[14, 7, 3, 3]|
+      * +-----+-------------+
+      */
+  }
+
+  // ############################################################################################################
+
+  @Test
+  def test62537898(): Unit = {
+    val data =
+      """
+        |id  | query
+        |1   | select * from table_a, table_b
+        |2   | select * from table_c join table_d on table_c.id=table_d.id
+      """.stripMargin
+    val stringDS = data.split(System.lineSeparator())
+      .map(_.split("\\|").map(_.replaceAll("""^[ \t]+|[ \t]+$""", "")).mkString(";"))
+      .toSeq.toDS()
+    val df = spark.read
+      .option("sep", ";")
+      .option("inferSchema", "true")
+      .option("header", "true")
+      .option("nullValue", "null")
+      .csv(stringDS)
+    df.printSchema()
+    df.show(false)
+
+    /**
+      * root
+      * |-- id: integer (nullable = true)
+      * |-- query: string (nullable = true)
+      *
+      * +---+-----------------------------------------------------------+
+      * |id |query                                                      |
+      * +---+-----------------------------------------------------------+
+      * |1  |select * from table_a, table_b                             |
+      * |2  |select * from table_c join table_d on table_c.id=table_d.id|
+      * +---+-----------------------------------------------------------+
+      */
+
+    // spark >= 2.4.0
+    df.createOrReplaceTempView("queries")
+    spark.sql(
+      """
+        |select id,
+        |   array_distinct(
+        |   FILTER(
+        |     split(query, '\\.|=|\\s+|,'), x -> x rlike 'table_a|table_b|table_c|table_d'
+        |     )
+        |    )as tables
+        |FROM
+        |   queries
+      """.stripMargin)
+      .show(false)
+
+    /**
+      * +---+------------------+
+      * |id |tables            |
+      * +---+------------------+
+      * |1  |[table_a, table_b]|
+      * |2  |[table_c, table_d]|
+      * +---+------------------+
+      */
+
+  }
+
+  // ############################################################################################################
+
+  @Test
+  def test62559906(): Unit = {
+    val df1 = Seq("24 Jun 2020").toDF("dateStringType")
+    df1.show(false)
+    /**
+      * +--------------+
+      * |dateStringType|
+      * +--------------+
+      * |24 Jun 2020   |
+      * +--------------+
+      */
+
+    // default date format is "yyyy-MM-dd"
+    df1.withColumn("dateDateType", to_date($"dateStringType", "dd MMM yyyy"))
+      .show(false)
+    /**
+      * +--------------+------------+
+      * |dateStringType|dateDateType|
+      * +--------------+------------+
+      * |24 Jun 2020   |2020-06-24  |
+      * +--------------+------------+
+      */
+
+    // Use date_format to change the default date_format to "dd-MM-yyyy"
+    df1.withColumn("changDefaultFormat", date_format(to_date($"dateStringType", "dd MMM yyyy"), "dd-MM-yyyy"))
+      .show(false)
+    /**
+      * +--------------+------------------+
+      * |dateStringType|changDefaultFormat|
+      * +--------------+------------------+
+      * |24 Jun 2020   |24-06-2020        |
+      * +--------------+------------------+
+      */
+  }
+  // ############################################################################################################
+
+  @Test
+  def test62559995(): Unit = {
+   val inputDF =  Seq(
+      (Vectors.dense(Array(0.1, 0.2, 0.3)), 0.0),
+      (Vectors.dense(Array(0.2, 0.2, 0.3)), 1.0),
+      (Vectors.dense(Array(0.1, 0.2, 0.5)), 0.0)
+    ).toDF("features", "label")
+    // specify layers for the neural network:
+    // input layer of size 4 (features), two intermediate of size 5 and 4
+    // and output of size 3 (classes)
+    val layers = Array(4, 5, 5, 3)
+//    val est = new MultilayerPerceptronClassifier()
+//      .setLayers(layers)
+//      .setSeed(System.currentTimeMillis)
+////      .setBlockSize(128)
+//      .setMaxIter(200)
+//      .setThresholds(Array(0.1, 0.2)) // 2 classes
+//
+//    est.fit(inputDF)
+//      .transform(inputDF).show(false)
+
+
+    val mlp = new MultilayerPerceptronClassifier()
+      .setLayers(layers)
+      .setSeed(System.currentTimeMillis)
+      .setBlockSize(128)
+      .setMaxIter(200)
+//      .setThresholds(Array(0.1, 0.2, 0.3, 0.4))
+//      .setFeaturesCol("indexedFeatures")
+//      .setLabelCol("indexedLabel")
+    val pipe = new Pipeline().setStages(Array(mlp))
+    val grid = new ParamGridBuilder()
+      .addGrid(mlp.thresholds, Array(Array(0.1, 0.2), Array(0.2, 0.3)))
+      .build()
+    val cv = new CrossValidator()
+        .setEstimator(pipe)
+        .setEvaluator(new MulticlassClassificationEvaluator().setMetricName("f1"))
+        .setNumFolds(2)
+      .setEstimatorParamMaps(grid)
+      .setParallelism(2)
+
+    val cvModel = cv.fit(inputDF)
+    cvModel.transform(inputDF).show(false)
+  }
+
+  // ############################################################################################################
+
+  @Test
+  def test62565757(): Unit = {
+    val tokenizer = new RegexTokenizer()
+      .setInputCol("text")
+      .setOutputCol("words")
+      .setPattern("\\W")
+
+    val inputDF = Seq("this is text", null).toDF("text")
+    inputDF.show(false)
+
+    /**
+      * +------------+
+      * |text        |
+      * +------------+
+      * |this is text|
+      * |null        |
+      * +------------+
+      */
+
+    // this fails
+    tokenizer.transform(inputDF)
+      .show(false)
+
+    /**
+      * Caused by: java.lang.NullPointerException
+      * at org.apache.spark.ml.feature.RegexTokenizer$$anonfun$createTransformFunc$2.apply(Tokenizer.scala:143)
+      * at org.apache.spark.ml.feature.RegexTokenizer$$anonfun$createTransformFunc$2.apply(Tokenizer.scala:141)
+      */
+
+    // Either remove null rows or impute null columns
+    // replace nulls from text col to specified string as below
+    val nullImputedDF = inputDF.na.fill("I am null imputed", Seq("text"))
+    tokenizer.transform(nullImputedDF)
+      .show(false)
+
+    /**
+      * +-----------------+----------------------+
+      * |text             |words                 |
+      * +-----------------+----------------------+
+      * |this is text     |[this, is, text]      |
+      * |I am null imputed|[i, am, null, imputed]|
+      * +-----------------+----------------------+
+      */
+  }
+
+  // ############################################################################################################
+  import org.apache.spark.sql.functions._
+  import org.apache.spark.sql.DataFrame
+  /** Extends the [[org.apache.spark.sql.DataFrame]] class
+    *
+    *  @param df the data frame to melt
+    */
+  implicit class DataFrameFunctions(df: DataFrame) {
+
+    /** Convert [[org.apache.spark.sql.DataFrame]] from wide to long format.
+      *
+      *  melt is (kind of) the inverse of pivot
+      *  melt is currently (02/2017) not implemented in spark
+      *
+      *  @see reshape packe in R (https://cran.r-project.org/web/packages/reshape/index.html)
+      *  @see this is a scala adaptation of http://stackoverflow.com/questions/41670103/pandas-melt-function-in-apache-spark
+      *
+      *  @todo method overloading for simple calling
+      *
+      *  @param id_vars the columns to preserve
+      *  @param value_vars the columns to melt
+      *  @param var_name the name for the column holding the melted columns names
+      *  @param value_name the name for the column holding the values of the melted columns
+      *
+      */
+
+    def melt(
+              id_vars: Seq[String], value_vars: Seq[String],
+              var_name: String = "variable", value_name: String = "value") : DataFrame = {
+
+      // Create array<struct<variable: str, value: ...>>
+      val _vars_and_vals = array((for (c <- value_vars) yield { struct(lit(c).alias(var_name), col(c).alias(value_name)) }): _*)
+
+      // Add to the DataFrame and explode
+      val _tmp = df.withColumn("_vars_and_vals", explode(_vars_and_vals))
+
+      val cols = id_vars.map(col) ++ { for (x <- List(var_name, value_name)) yield { col("_vars_and_vals")(x).alias(x) }}
+
+      _tmp.select(cols: _*)
+
+    }
+  }
+
+  @Test
+  def test62569450(): Unit = {
+    val df = Seq((2010, 0.9962, 1.216, 1.3004),
+      (2011, 0.9864, 1.197, 1.2565),
+      (2012, 0.9861, 1.186, 1.2174))
+      .toDF("year", "index_x", "index_y", "index_z")
+    df.show(false)
+    df.printSchema()
+
+    /**
+      * +----+-------+-------+-------+
+      * |year|index_x|index_y|index_z|
+      * +----+-------+-------+-------+
+      * |2010|0.9962 |1.216  |1.3004 |
+      * |2011|0.9864 |1.197  |1.2565 |
+      * |2012|0.9861 |1.186  |1.2174 |
+      * +----+-------+-------+-------+
+      *
+      * root
+      * |-- year: integer (nullable = false)
+      * |-- index_x: double (nullable = false)
+      * |-- index_y: double (nullable = false)
+      * |-- index_z: double (nullable = false)
+      */
+
+    df.selectExpr("year",
+      "stack(3, 'index_x', index_x,'index_y', index_y, 'index_z', index_z) as (index, value)")
+      .show(false)
+
+    /**
+      * +----+-------+------+
+      * |year|index  |value |
+      * +----+-------+------+
+      * |2010|index_x|0.9962|
+      * |2010|index_y|1.216 |
+      * |2010|index_z|1.3004|
+      * |2011|index_x|0.9864|
+      * |2011|index_y|1.197 |
+      * |2011|index_z|1.2565|
+      * |2012|index_x|0.9861|
+      * |2012|index_y|1.186 |
+      * |2012|index_z|1.2174|
+      * +----+-------+------+
+      */
+
+    df.melt(Seq("index_x", "index_y", "index_z"), Seq("index_x", "index_y", "index_z"))
+      .show(false)
+
+    /**
+      * +-------+-------+-------+--------+------+
+      * |index_x|index_y|index_z|variable|value |
+      * +-------+-------+-------+--------+------+
+      * |0.9962 |1.216  |1.3004 |index_x |0.9962|
+      * |0.9962 |1.216  |1.3004 |index_y |1.216 |
+      * |0.9962 |1.216  |1.3004 |index_z |1.3004|
+      * |0.9864 |1.197  |1.2565 |index_x |0.9864|
+      * |0.9864 |1.197  |1.2565 |index_y |1.197 |
+      * |0.9864 |1.197  |1.2565 |index_z |1.2565|
+      * |0.9861 |1.186  |1.2174 |index_x |0.9861|
+      * |0.9861 |1.186  |1.2174 |index_y |1.186 |
+      * |0.9861 |1.186  |1.2174 |index_z |1.2174|
+      * +-------+-------+-------+--------+------+
+      */
+  }
+  // ############################################################################################################
+  @Test
+  def test62557995(): Unit = {
+    val df1 = Seq(("2014-10-06"), ("2014-10-07"), ("2014-10-08"), ("2014-10-09"), ("2014-10-10")).toDF("DATE")
+    df1.printSchema()
+
+    /**
+      * root
+      * |-- DATE: string (nullable = true)
+      */
+    import org.apache.spark.sql.functions.{col, to_date}
+    val df2 = df1.withColumn("DATE", to_date(col("DATE"), "yyyy-MM-dd"))
+    df2.printSchema()
+
+    /**
+      * root
+      * |-- DATE: date (nullable = true)
+      */
+
+    df2.write.mode(SaveMode.Overwrite).parquet("/Users/sokale/models/stack")
+
+    spark.read.parquet("/Users/sokale/models/stack").show(false)
+
+    /**
+      * +----------+
+      * |DATE      |
+      * +----------+
+      * |2014-10-08|
+      * |2014-10-09|
+      * |2014-10-10|
+      * |2014-10-06|
+      * |2014-10-07|
+      * +----------+
+      */
+
+    val df = spark.sql("select company from values (named_struct('0', 'foo', '1', 'bar')) T(company)")
+    df.show(false)
+    df.printSchema()
+    /**
+      * +----------+
+      * |company   |
+      * +----------+
+      * |[foo, bar]|
+      * +----------+
+      *
+      * root
+      * |-- company: struct (nullable = false)
+      * |    |-- 0: string (nullable = false)
+      * |    |-- 1: string (nullable = false)
+      */
+
+    val structCols = df.schema("company").dataType.asInstanceOf[StructType].map(_.name)
+    df.withColumn("company", map_from_arrays(
+      array(structCols.map(lit): _*),
+      array(structCols.map(c => col(s"company.$c")): _*)
+    ))
+      .selectExpr("explode(company) as (id, name)")
+      .show(false)
+
+    /**
+      * +---+----+
+      * |id |name|
+      * +---+----+
+      * |0  |foo |
+      * |1  |bar |
+      * +---+----+
+      */
+  }
+  // ############################################################################################################
+  @Test
+  def test62591952(): Unit = {
+    val data =
+      """
+        |writingTime,time
+        |2020-06-25T13:29:34.415Z,2020-06-25T13:29:33.190Z
+      """.stripMargin
+
+    val df = spark.read
+      .option("header","true")
+      .csv(data.split(System.lineSeparator()).toSeq.toDS())
+    df.show(false)
+    df.printSchema()
+
+    val resultDf = df.withColumn("date_diff_seconds",
+      $"writingTime".cast("timestamp").cast("long") -  $"time".cast("timestamp").cast("long"))
+    resultDf.show(false)
+
+    /**
+      * +------------------------+------------------------+---+
+      * |writingTime             |time                    |date_diff_seconds  |
+      * +------------------------+------------------------+---+
+      * |2020-06-25T13:29:34.415Z|2020-06-25T13:29:33.190Z|1  |
+      * +------------------------+------------------------+---+
+      */
+
+  }
+
+  // ############################################################################################################
+  @Test
+  def test62592221(): Unit = {
+    val data1 =
+      """
+        | id|filter
+        |  1|       YES
+        |  2|        NO
+        |  3|        NO
+      """.stripMargin
+    val stringDS1 = data1.split(System.lineSeparator())
+      .map(_.split("\\|").map(_.replaceAll("""^[ \t]+|[ \t]+$""", "")).mkString(";"))
+      .toSeq.toDS()
+    val df1 = spark.read
+      .option("sep", ";")
+      .option("inferSchema", "true")
+      .option("header", "true")
+      .option("nullValue", "null")
+      .csv(stringDS1)
+    df1.printSchema()
+    df1.show(false)
+    /**
+      * root
+      * |-- id: integer (nullable = true)
+      * |-- filter: string (nullable = true)
+      *
+      * +---+------+
+      * |id |filter|
+      * +---+------+
+      * |1  |YES   |
+      * |2  |NO    |
+      * |3  |NO    |
+      * +---+------+
+      */
+
+    val data2 =
+      """
+        |                   1|  2|  3|  4|  5|  6|  7|  8|  9| 10| 11| 12| 13| 14| 15
+        |XXXXXX              |NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN
+        |YYYYYY              |NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN
+      """.stripMargin
+    val stringDS2 = data2.split(System.lineSeparator())
+      .map(_.split("\\|").map(_.replaceAll("""^[ \t]+|[ \t]+$""", "")).mkString(";"))
+      .toSeq.toDS()
+    val df2 = spark.read
+      .option("sep", ";")
+      .option("inferSchema", "true")
+      .option("header", "true")
+      .option("nullValue", "null")
+      .csv(stringDS2)
+    df2.printSchema()
+    df2.show(false)
+    /**
+      * root
+      * |-- 1: string (nullable = true)
+      * |-- 2: double (nullable = true)
+      * |-- 3: double (nullable = true)
+      * |-- 4: double (nullable = true)
+      * |-- 5: double (nullable = true)
+      * |-- 6: double (nullable = true)
+      * |-- 7: double (nullable = true)
+      * |-- 8: double (nullable = true)
+      * |-- 9: double (nullable = true)
+      * |-- 10: double (nullable = true)
+      * |-- 11: double (nullable = true)
+      * |-- 12: double (nullable = true)
+      * |-- 13: double (nullable = true)
+      * |-- 14: double (nullable = true)
+      * |-- 15: double (nullable = true)
+      *
+      * +------+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      * |1     |2  |3  |4  |5  |6  |7  |8  |9  |10 |11 |12 |13 |14 |15 |
+      * +------+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      * |XXXXXX|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|
+      * |YYYYYY|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|NaN|
+      * +------+---+---+---+---+---+---+---+---+---+---+---+---+---+---+
+      */
+
+    val stringCol = df2.columns.map(c => s"'$c', cast(`$c` as string)").mkString(", ")
+
+    val processedDF = df2.selectExpr(s"stack(${df2.columns.length}, $stringCol) as (id, value)")
+    processedDF.show(false)
+
+    /**
+      * +---+------+
+      * |id |value |
+      * +---+------+
+      * |1  |XXXXXX|
+      * |2  |NaN   |
+      * |3  |NaN   |
+      * |4  |NaN   |
+      * |5  |NaN   |
+      * |6  |NaN   |
+      * |7  |NaN   |
+      * |8  |NaN   |
+      * |9  |NaN   |
+      * |10 |NaN   |
+      * |11 |NaN   |
+      * |12 |NaN   |
+      * |13 |NaN   |
+      * |14 |NaN   |
+      * |15 |NaN   |
+      * |1  |YYYYYY|
+      * |2  |NaN   |
+      * |3  |NaN   |
+      * |4  |NaN   |
+      * |5  |NaN   |
+      * +---+------+
+      * only showing top 20 rows
+      */
+
+    df1.join(processedDF, "id")
+      .groupBy("id", "filter")
+      .agg(collect_list("value").as("value"))
+      .selectExpr("id", "filter", "FILTER(value, x -> x != 'NaN') as value")
+      .show(false)
+
+    /**
+      * +---+------+----------------+
+      * |id |filter|value           |
+      * +---+------+----------------+
+      * |2  |NO    |[]              |
+      * |1  |YES   |[XXXXXX, YYYYYY]|
+      * |3  |NO    |[]              |
+      * +---+------+----------------+
+      */
+  }
+  // ############################################################################################################
+  @Test
+  def test62597711(): Unit = {
+    val df = spark.sql("select customer_id, start_times from values ('cust1'," +
+      "array('2020-04-02T08:15:50+01:00', '2020-04-02T08:15:53+01:00', " +
+      "'2020-04-02T08:15:56+01:00', '2020-04-02T08:16:01+01:00'," +
+      " '2020-04-02T08:16:07+01:00', '2020-04-02T08:21:05+01:00', '2020-04-02T08:21:17+01:00', " +
+      "'2020-04-02T08:21:30+01:00', '2020-04-02T08:21:43+01:00', '2020-04-02T08:21:49+01:00'," +
+      " '2020-04-02T08:22:11+01:00', '2020-04-02T08:22:16+01:00', '2020-04-02T08:24:02+01:00'," +
+      " '2020-04-02T08:24:09+01:00', '2020-04-02T08:24:37+01:00', '2020-04-02T08:36:26+01:00', " +
+      "'2020-04-02T08:39:25+01:00', '2020-04-02T08:39:41+01:00', '2020-04-02T08:39:52+01:00'," +
+      " '2020-04-02T08:40:18+01:00', '2020-04-02T08:40:27+01:00', '2020-04-02T08:40:33+01:00', " +
+      "'2020-04-02T08:40:49+01:00', '2020-04-02T08:41:03+01:00', '2020-04-02T08:41:29+01:00'," +
+      " '2020-04-02T08:42:00+01:00', '2020-04-02T08:42:23+01:00', '2020-04-02T08:42:57+01:00', " +
+      "'2020-04-02T08:44:43+01:00', '2020-04-02T08:55:49')) " +
+      "T(customer_id, start_times)")
+
+    df.show(false)
+    df.printSchema()
+
+
+    // ISO 8601
+    val format = "'yyyy-MM-dd'T'HH:mm:ss'"
+    println(s"""TRANSFORM(start_times, x -> to_timestamp(x,$format ))""")
+    spark.sql(s"select id from values (to_timestamp('2020-04-02T08:55:49', 'yyyy-MM-dd''T''HH:mm:ss')) T(id)")
+      .show(false)
+    df.withColumn("start_times",
+      expr(s"""TRANSFORM(start_times, x -> to_timestamp(x,$format ))"""))
+      .show(false)
+
+    val seconds = 10 * 60 // 10 minutes in seconds
+    val processedDF = df.withColumn("start_times",
+      expr("TRANSFORM(start_times, " +
+        s"(x, i) -> if(cast(cast(i as timestamp) as long) - cast(cast(x as timestamp) as long) >= $seconds, 1, 0))"))
+    processedDF.show(false)
+    processedDF.printSchema()
+  }
+
+  // ############################################################################################################
+  @Test
+  def test62604656(): Unit = {
+    val df = Seq((1,10),(1,11),(1,12),(2,10),(2,11),(3,11),(3,12),(4,10),(4,11),(5,12),(6,12)).toDF("id1","id2")
+    df.show(false)
+
+    val p = df.withColumn("split1", dense_rank().over(Window.partitionBy("id2").orderBy("id1")))
+      .withColumn("split1", $"split1" % 2 === 0)
+      .withColumn("split2", $"id1" % 2 === 0)
+      p.show(false)
+    p.filter($"split1" && $"split2").show(false)
+    p.filter(!($"split1" && $"split2")).show(false)
+  }
+
+  // ############################################################################################################
+  @Test
+  def test62606565(): Unit = {
+    val data1 =
+      """Tempe, AZ, USA
+        |San Jose, CA, USA
+        |Mountain View, CA, USA""".stripMargin
+    val df1 = data1.split(System.lineSeparator()).toSeq.toDF("address")
+    df1.show(false)
+    /**
+      * +----------------------+
+      * |address               |
+      * +----------------------+
+      * |Tempe, AZ, USA        |
+      * |San Jose, CA, USA     |
+      * |Mountain View, CA, USA|
+      * +----------------------+
+      */
+
+    val data2 =
+      """Tempe, AZ
+        |Tempe, Arizona
+        |San Jose, USA
+        |San Jose, CA
+        |Mountain View, CA""".stripMargin
+
+    val df2 = data2.split(System.lineSeparator()).toSeq.toDF("address")
+    df2.show(false)
+
+    /**
+      * +-----------------+
+      * |address          |
+      * +-----------------+
+      * |Tempe, AZ        |
+      * |Tempe, Arizona   |
+      * |San Jose, USA    |
+      * |San Jose, CA     |
+      * |Mountain View, CA|
+      * +-----------------+
+      */
+
+    df1.withColumn("joiningKey", substring_index($"address", ",", 1))
+      .join(
+        df2.withColumn("joiningKey", substring_index($"address", ",", 1)),
+        "joiningKey"
+      )
+      .select(df1("address"), df2("address"))
+      .show(false)
+
+    /**
+      * +----------------------+-----------------+
+      * |address               |address          |
+      * +----------------------+-----------------+
+      * |Tempe, AZ, USA        |Tempe, AZ        |
+      * |Tempe, AZ, USA        |Tempe, Arizona   |
+      * |San Jose, CA, USA     |San Jose, USA    |
+      * |San Jose, CA, USA     |San Jose, CA     |
+      * |Mountain View, CA, USA|Mountain View, CA|
+      * +----------------------+-----------------+
+      */
+  }
+
+  // ############################################################################################################
+  @Test
+  def test62611515(): Unit = {
+    val data =
+      """
+        |student_id|exam_center_id|   subject|year|quarter|score|grade
+        |         1|             1|      Math|2005|      1|   41|    D
+        |         1|             1|   Spanish|2005|      1|   51|    C
+        |         1|             1|    German|2005|      1|   39|    D
+        |         1|             1|   Physics|2005|      1|   35|    D
+        |         1|             1|   Biology|2005|      1|   53|    C
+        |         1|             1|Philosophy|2005|      1|   73|    B
+      """.stripMargin
+    val stringDS = data.split(System.lineSeparator())
+      .map(_.split("\\|").map(_.replaceAll("""^[ \t]+|[ \t]+$""", "")).mkString(";"))
+      .toSeq.toDS()
+    val df = spark.read
+      .option("sep", ";")
+      .option("inferSchema", "true")
+      .option("header", "true")
+      .option("nullValue", "null")
+      .csv(stringDS)
+    df.show(false)
+    df.printSchema()
+
+    val highestScores = df.groupBy("subject").max("score")
+    highestScores.show(10)
+    highestScores.createOrReplaceTempView("students")
+    spark.sql("explain select * from highestScores limit 10").show(false)
+    highestScores.explain()
+
+  }
+  // ############################################################################################################
+  @Test
+  def test62610118(): Unit = {
+    val data =
+      """
+        |DESTINATION_ID,LOCATION_ID,LATITUDE
+        |ENSG00000257017,EAST_0000182,0.07092000000000001
+        |ENSG00000257017,WEST_0001397,0.07092000000000001
+        |ENSG00000181965,EAST_1001951,0.07056000000000001
+        |ENSG00000146648,EAST_0000616,0.07092000000000001
+        |ENSG00000111537,WEST_0001845,0.07092000000000001
+        |ENSG00000103222,EAST_0000565,0.07056000000000001
+        |ENSG00000118137,EAST_0000508,0.07092000000000001
+        |ENSG00000112715,EAST_0000616,0.07092000000000001
+        |ENSG00000108984,EAST_0000574,0.07056000000000001
+        |ENSG00000159640,NORTH_797,0.07092000000000001
+        |ENSG00000113522,NORTH_790,0.07056000000000001
+      """.stripMargin
+    val stringDS = data.split(System.lineSeparator())
+      .map(_.split("\\,").map(_.replaceAll("""^[ \t]+|[ \t]+$""", "")).mkString(","))
+      .toSeq.toDS()
+    val df = spark.read
+      .option("sep", ",")
+      .option("inferSchema", "true")
+      .option("header", "true")
+      .option("nullValue", "null")
+      .csv(stringDS)
+    df.show(false)
+    df.printSchema()
+
+    /**
+      * +---------------+------------+-------------------+
+      * |DESTINATION_ID |LOCATION_ID |LATITUDE           |
+      * +---------------+------------+-------------------+
+      * |ENSG00000257017|EAST_0000182|0.07092000000000001|
+      * |ENSG00000257017|WEST_0001397|0.07092000000000001|
+      * |ENSG00000181965|EAST_1001951|0.07056000000000001|
+      * |ENSG00000146648|EAST_0000616|0.07092000000000001|
+      * |ENSG00000111537|WEST_0001845|0.07092000000000001|
+      * |ENSG00000103222|EAST_0000565|0.07056000000000001|
+      * |ENSG00000118137|EAST_0000508|0.07092000000000001|
+      * |ENSG00000112715|EAST_0000616|0.07092000000000001|
+      * |ENSG00000108984|EAST_0000574|0.07056000000000001|
+      * |ENSG00000159640|NORTH_797   |0.07092000000000001|
+      * |ENSG00000113522|NORTH_790   |0.07056000000000001|
+      * +---------------+------------+-------------------+
+      *
+      * root
+      * |-- DESTINATION_ID: string (nullable = true)
+      * |-- LOCATION_ID: string (nullable = true)
+      * |-- LATITUDE: double (nullable = true)
+      */
+
+    df.createOrReplaceTempView("people")
+    spark.sql(
+      """
+        |SELECT
+        |  DESTINATION_ID,
+        |  LOCATION_ID,
+        |  avg(LATITUDE) as median
+        |FROM
+        |  (
+        |    SELECT
+        |      DESTINATION_ID,
+        |      LOCATION_ID,
+        |      LATITUDE,
+        |      rN,
+        |      (
+        |        CASE WHEN cN % 2 = 0 then (cN / 2) ELSE (cN / 2) + 1 end
+        |      ) as m1,
+        |      (cN / 2) + 1 as m2
+        |    FROM
+        |      (
+        |        SELECT
+        |          DESTINATION_ID,
+        |          LOCATION_ID,
+        |          LATITUDE,
+        |          row_number() OVER (
+        |            PARTITION BY DESTINATION_ID,
+        |            LOCATION_ID
+        |            ORDER BY
+        |              LATITUDE
+        |          ) as rN,
+        |          count(LATITUDE) OVER (PARTITION BY DESTINATION_ID, LOCATION_ID) as cN
+        |        FROM
+        |          people
+        |      ) s
+        |  ) r
+        |WHERE
+        |  rN BETWEEN m1
+        |  and m2
+        |GROUP BY
+        |  DESTINATION_ID,
+        |  LOCATION_ID
+      """.stripMargin)
+      .show(false)
+
+    /**
+      * +--------------+-----------+------+
+      * |DESTINATION_ID|LOCATION_ID|median|
+      * +--------------+-----------+------+
+      * +--------------+-----------+------+
+      */
+
+    spark.sql(
+      """
+        |SELECT *
+        |FROM people k NATURAL JOIN
+        |(SELECT
+        |  DESTINATION_ID,
+        |  LOCATION_ID,
+        |  avg(LATITUDE) as median
+        |FROM
+        |  (
+        |    SELECT
+        |      DESTINATION_ID,
+        |      LOCATION_ID,
+        |      LATITUDE,
+        |      rN,
+        |      (
+        |        CASE WHEN cN % 2 = 0 then (cN / 2) ELSE (cN / 2) - 1 end
+        |      ) as m1,
+        |      (cN / 2) + 1 as m2
+        |    FROM
+        |      (
+        |        SELECT
+        |          DESTINATION_ID,
+        |          LOCATION_ID,
+        |          LATITUDE,
+        |          row_number() OVER (
+        |            PARTITION BY DESTINATION_ID,
+        |            LOCATION_ID
+        |            ORDER BY
+        |              LATITUDE
+        |          ) as rN,
+        |          count(LATITUDE) OVER (PARTITION BY DESTINATION_ID, LOCATION_ID) as cN
+        |        FROM
+        |          people
+        |      ) s
+        |  ) r
+        |WHERE
+        |  rN BETWEEN m1
+        |  and m2
+        |GROUP BY
+        |  DESTINATION_ID,
+        |  LOCATION_ID
+        |  ) t
+      """.stripMargin)
+      .show(false)
+
+    /**
+      * +---------------+------------+-------------------+-------------------+
+      * |DESTINATION_ID |LOCATION_ID |LATITUDE           |median             |
+      * +---------------+------------+-------------------+-------------------+
+      * |ENSG00000111537|WEST_0001845|0.07092000000000001|0.07092000000000001|
+      * |ENSG00000257017|WEST_0001397|0.07092000000000001|0.07092000000000001|
+      * |ENSG00000103222|EAST_0000565|0.07056000000000001|0.07056000000000001|
+      * |ENSG00000108984|EAST_0000574|0.07056000000000001|0.07056000000000001|
+      * |ENSG00000112715|EAST_0000616|0.07092000000000001|0.07092000000000001|
+      * |ENSG00000113522|NORTH_790   |0.07056000000000001|0.07056000000000001|
+      * |ENSG00000118137|EAST_0000508|0.07092000000000001|0.07092000000000001|
+      * |ENSG00000146648|EAST_0000616|0.07092000000000001|0.07092000000000001|
+      * |ENSG00000159640|NORTH_797   |0.07092000000000001|0.07092000000000001|
+      * |ENSG00000181965|EAST_1001951|0.07056000000000001|0.07056000000000001|
+      * |ENSG00000257017|EAST_0000182|0.07092000000000001|0.07092000000000001|
+      * +---------------+------------+-------------------+-------------------+
+      */
+  }
+
+  // ############################################################################################################
+  @Test
+  def test62618949(): Unit = {
+    val df = spark.sql(
+      """
+        |select user_id, user_loans_arr, new_loan
+        |from values
+        | ('u1', array(named_struct('loan_date', '2019-01-01', 'loan_amount', 100)), named_struct('loan_date',
+        | '2020-01-01', 'loan_amount', 100)),
+        | ('u2', array(named_struct('loan_date', '2020-01-01', 'loan_amount', 200)), named_struct('loan_date',
+        | '2020-01-01', 'loan_amount', 100))
+        | T(user_id, user_loans_arr, new_loan)
+      """.stripMargin)
+    df.show(false)
+    df.printSchema()
+
+    /**
+      * +-------+-------------------+-----------------+
+      * |user_id|user_loans_arr     |new_loan         |
+      * +-------+-------------------+-----------------+
+      * |u1     |[[2019-01-01, 100]]|[2020-01-01, 100]|
+      * |u2     |[[2020-01-01, 200]]|[2020-01-01, 100]|
+      * +-------+-------------------+-----------------+
+      *
+      * root
+      * |-- user_id: string (nullable = false)
+      * |-- user_loans_arr: array (nullable = false)
+      * |    |-- element: struct (containsNull = false)
+      * |    |    |-- loan_date: string (nullable = false)
+      * |    |    |-- loan_amount: integer (nullable = false)
+      * |-- new_loan: struct (nullable = false)
+      * |    |-- loan_date: string (nullable = false)
+      * |    |-- loan_amount: integer (nullable = false)
+      */
+
+    // spark >=2.4
+    df.withColumn("user_loans_arr",
+      expr(
+        """
+          |FILTER(array_union(user_loans_arr, array(new_loan)),
+          | x -> months_between(current_date(), to_date(x.loan_date)) < 12)
+        """.stripMargin))
+      .show(false)
+
+    /**
+      * +-------+--------------------------------------+-----------------+
+      * |user_id|user_loans_arr                        |new_loan         |
+      * +-------+--------------------------------------+-----------------+
+      * |u1     |[[2020-01-01, 100]]                   |[2020-01-01, 100]|
+      * |u2     |[[2020-01-01, 200], [2020-01-01, 100]]|[2020-01-01, 100]|
+      * +-------+--------------------------------------+-----------------+
+      */
+
+    // spark < 2.4
+    val outputSchema = df.schema("user_loans_arr").dataType
+
+    import java.time._
+    val add_and_filter = udf((userLoansArr: mutable.WrappedArray[Row], loan: Row) => {
+      (userLoansArr :+ loan).filter(row => {
+        val loanDate = LocalDate.parse(row.getAs[String]("loan_date"))
+        val period = Period.between(loanDate, LocalDate.now())
+        period.getYears * 12 + period.getMonths < 12
+      })
+    }, outputSchema)
+
+    df.withColumn("user_loans_arr", add_and_filter($"user_loans_arr", $"new_loan"))
+      .show(false)
+
+    /**
+      * +-------+--------------------------------------+-----------------+
+      * |user_id|user_loans_arr                        |new_loan         |
+      * +-------+--------------------------------------+-----------------+
+      * |u1     |[[2020-01-01, 100]]                   |[2020-01-01, 100]|
+      * |u2     |[[2020-01-01, 200], [2020-01-01, 100]]|[2020-01-01, 100]|
+      * +-------+--------------------------------------+-----------------+
+      */
+  }
+
+  // ############################################################################################################
+  @Test
+  def test62631961(): Unit = {
+    val df = spark.sql(
+      """
+        |select amount
+        |from values
+        |(array(1197, 8797, 6146, 253, 4521, 955)),
+        |(array(1197, 8797, 6146, 253, 4521, 955))
+        |T(amount)
+      """.stripMargin)
+    df.show(false)
+    df.printSchema()
+
+    /**
+      * +----------------------------------+
+      * |amount                            |
+      * +----------------------------------+
+      * |[1197, 8797, 6146, 253, 4521, 955]|
+      * |[1197, 8797, 6146, 253, 4521, 955]|
+      * +----------------------------------+
+      *
+      * root
+      * |-- amount: array (nullable = false)
+      * |    |-- element: integer (containsNull = false)
+      */
+
+    //spark >=2.4
+    df.selectExpr(
+      "aggregate(amount, 0, (x, y) -> x + y) as details_sum"
+    ).show()
+
+    /**
+      * +-----------+
+      * |details_sum|
+      * +-----------+
+      * |      21869|
+      * |      21869|
+      * +-----------+
+      */
+      //spark < 2.4
+    val intArraySum = udf((arrayInt: mutable.WrappedArray[Int]) => arrayInt.sum)
+    df.select(
+      intArraySum($"amount").as("details_sum")
+    ).show()
+
+    /**
+      * +-----------+
+      * |details_sum|
+      * +-----------+
+      * |      21869|
+      * |      21869|
+      * +-----------+
+      */
+
+    val intSeqSum = udf((arrayInt: Seq[Int]) => arrayInt.sum)
+    df.select(
+      intSeqSum($"amount").as("details_sum")
+    ).show()
+
+    /**
+      * +-----------+
+      * |details_sum|
+      * +-----------+
+      * |      21869|
+      * |      21869|
+      * +-----------+
+      */
   }
 
 }
