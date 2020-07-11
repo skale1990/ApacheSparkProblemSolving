@@ -3,6 +3,7 @@ package com.som.spark.learning;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
+import com.twitter.chill.KryoSerializer;
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
@@ -31,9 +32,13 @@ import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder;
 import org.apache.spark.sql.catalyst.encoders.RowEncoder;
 import org.apache.spark.sql.catalyst.plans.RightOuter;
 import org.apache.spark.sql.expressions.UserDefinedFunction;
+import org.apache.spark.sql.geosparksql.expressions.ST_GeomFromText;
+import org.apache.spark.sql.geosparksql.expressions.ST_GeomFromText$;
 import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.util.LongAccumulator;
+import org.datasyslab.geospark.serde.GeoSparkKryoRegistrator;
+import org.datasyslab.geosparksql.UDF.Catalog;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -68,6 +73,7 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import org.datasyslab.geosparksql.utils.GeoSparkSQLRegistrator;
 
 import static scala.collection.JavaConversions.*;
 import static scala.collection.JavaConverters.*;
@@ -978,6 +984,68 @@ public class JavaProblemSolverTest implements Serializable {
          *  |-- cat: string (nullable = true)
          *  |-- tag: array (nullable = true)
          *  |    |-- element: string (containsNull = true)
+         */
+
+        // SO = 62788484
+        Dataset <Row> dataframe1 = dataFrame;
+        Dataset <Row> dataframe2 = dataFrame;
+        Dataset <Row> dataframe3 = dataFrame;
+        Dataset <Row> df= dataframe1.filter(when(col("diffDate").lt(3888),
+                dataframe1.join(dataframe2,
+                dataframe2.col("id_device").equalTo(dataframe1.col("id_device")).
+                        and(dataframe2.col("id_vehicule").equalTo(dataframe1.col("id_vehicule"))).
+                        and(dataframe2.col("tracking_time").lt(dataframe1.col("tracking_time"))).
+                        and(dataframe1.col("diffDate").lt(3888))
+                )
+                        .orderBy(dataframe2.col("tracking_time").desc())
+        ).
+                otherwise(dataframe1.join(dataframe3,
+                        dataframe3.col("id_device").equalTo(dataframe1.col("id_device")).
+                                and(dataframe3.col("id_vehicule").equalTo(dataframe1.col("id_vehicule"))).
+                                and(dataframe3.col("tracking_time").lt(dataframe1.col("tracking_time")))).orderBy(dataframe3.col("tracking_time").desc())));
+
+    }
+    // ############################################################################################################
+    @Test
+    public void test62837467() {
+        SparkSession sparkSession = SparkSession.builder()
+                .config("spark.serializer", KryoSerializer.class.getName())
+                .config("spark.kryo.registrator", GeoSparkKryoRegistrator.class.getName())
+                .master("local[*]")
+                .appName("myGeoSparkSQLdemo")
+                .getOrCreate();
+
+        // register all functions from geospark-sql_2.3 to sparkSession
+        GeoSparkSQLRegistrator.registerAll(sparkSession);
+        try {
+            System.out.println(sparkSession.catalog().getFunction("ST_Geomfromtext"));
+            // Function[name='ST_GeomFromText', className='org.apache.spark.sql.geosparksql.expressions.ST_GeomFromText$', isTemporary='true']
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+        // https://datasystemslab.github.io/GeoSpark/api/sql/GeoSparkSQL-Function/
+        Dataset<Row> dataframe = sparkSession.sql("select ST_GeomFromText('POINT(-7.07378166 33.826661)')");
+        dataframe.show(false);
+        dataframe.printSchema();
+        /**
+         * +---------------------------------------------+
+         * |st_geomfromtext(POINT(-7.07378166 33.826661))|
+         * +---------------------------------------------+
+         * |POINT (-7.07378166 33.826661)                |
+         * +---------------------------------------------+
+         */
+
+        // using longitude and latitude column from existing dataframe
+        Dataset<Row> df = sparkSession.sql("select -7.07378166 as longitude, 33.826661 as latitude");
+        df.withColumn("ST_Geomfromtext ",
+                expr("ST_GeomFromText(CONCAT('POINT(',longitude,' ',latitude,')'))"))
+        .show(false);
+        /**
+         * +-----------+---------+-----------------------------+
+         * |longitude  |latitude |ST_Geomfromtext              |
+         * +-----------+---------+-----------------------------+
+         * |-7.07378166|33.826661|POINT (-7.07378166 33.826661)|
+         * +-----------+---------+-----------------------------+
          */
     }
 

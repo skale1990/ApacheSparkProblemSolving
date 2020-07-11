@@ -1,0 +1,16 @@
+{
+	"type": "record",
+	"name": "topLevelRecord",
+	"fields": [{
+		"name": "price",
+		"type": {
+			"type": "fixed",
+			"name": "fixed",
+			"namespace": "topLevelRecord.price",
+			"size": 9,
+			"logicalType": "decimal",
+			"precision": 20,
+			"scale": 2
+		}
+	}]
+}
