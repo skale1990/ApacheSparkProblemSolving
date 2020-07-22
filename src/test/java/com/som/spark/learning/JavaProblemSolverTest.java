@@ -74,6 +74,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.datasyslab.geosparksql.utils.GeoSparkSQLRegistrator;
+import scala.reflect.api.TypeTags;
 
 import static scala.collection.JavaConversions.*;
 import static scala.collection.JavaConverters.*;
@@ -987,22 +988,23 @@ public class JavaProblemSolverTest implements Serializable {
          */
 
         // SO = 62788484
-        Dataset <Row> dataframe1 = dataFrame;
-        Dataset <Row> dataframe2 = dataFrame;
-        Dataset <Row> dataframe3 = dataFrame;
-        Dataset <Row> df= dataframe1.filter(when(col("diffDate").lt(3888),
-                dataframe1.join(dataframe2,
-                dataframe2.col("id_device").equalTo(dataframe1.col("id_device")).
-                        and(dataframe2.col("id_vehicule").equalTo(dataframe1.col("id_vehicule"))).
-                        and(dataframe2.col("tracking_time").lt(dataframe1.col("tracking_time"))).
-                        and(dataframe1.col("diffDate").lt(3888))
-                )
-                        .orderBy(dataframe2.col("tracking_time").desc())
-        ).
-                otherwise(dataframe1.join(dataframe3,
-                        dataframe3.col("id_device").equalTo(dataframe1.col("id_device")).
-                                and(dataframe3.col("id_vehicule").equalTo(dataframe1.col("id_vehicule"))).
-                                and(dataframe3.col("tracking_time").lt(dataframe1.col("tracking_time")))).orderBy(dataframe3.col("tracking_time").desc())));
+        // below code is not executable, added just to check semantics
+//        Dataset <Row> dataframe1 = dataFrame;
+//        Dataset <Row> dataframe2 = dataFrame;
+//        Dataset <Row> dataframe3 = dataFrame;
+//        Dataset <Row> df= dataframe1.filter(when(col("diffDate").lt(3888),
+//                dataframe1.join(dataframe2,
+//                dataframe2.col("id_device").equalTo(dataframe1.col("id_device")).
+//                        and(dataframe2.col("id_vehicule").equalTo(dataframe1.col("id_vehicule"))).
+//                        and(dataframe2.col("tracking_time").lt(dataframe1.col("tracking_time"))).
+//                        and(dataframe1.col("diffDate").lt(3888))
+//                )
+//                        .orderBy(dataframe2.col("tracking_time").desc())
+//        ).
+//                otherwise(dataframe1.join(dataframe3,
+//                        dataframe3.col("id_device").equalTo(dataframe1.col("id_device")).
+//                                and(dataframe3.col("id_vehicule").equalTo(dataframe1.col("id_vehicule"))).
+//                                and(dataframe3.col("tracking_time").lt(dataframe1.col("tracking_time")))).orderBy(dataframe3.col("tracking_time").desc())));
 
     }
     // ############################################################################################################
@@ -1047,6 +1049,137 @@ public class JavaProblemSolverTest implements Serializable {
          * |-7.07378166|33.826661|POINT (-7.07378166 33.826661)|
          * +-----------+---------+-----------------------------+
          */
+        df.withColumn("colName",concat_ws(",", toScalaSeq(Arrays.stream(df.columns()).map(functions::col).collect(Collectors.toList()))));
     }
+    // ############################################################################################################
+    @Test
+    public void test62898190() {
+        // alternative - 1
+        StructType s = new StructType()
+                .add(new StructField("Column_1", DataTypes.StringType, true, Metadata.empty()));
+        Dataset<Row> csv = spark.read().schema(s).csv(spark.emptyDataset(Encoders.STRING()));
+        csv.show(false);
+        csv.printSchema();
+        /**
+         * +--------+
+         * |Column_1|
+         * +--------+
+         * +--------+
+         *
+         * root
+         *  |-- Column_1: string (nullable = true)
+         */
+
+        // alternative-2
+        Dataset<Row> df4 = spark.sql("select cast(null  as string) Column_1");
+        df4.show(false);
+        df4.printSchema();
+        /**
+         * +--------+
+         * |Column_1|
+         * +--------+
+         * |null    |
+         * +--------+
+         *
+         * root
+         *  |-- Column_1: string (nullable = true)
+         */
+
+        // alternative-3
+        ClassTag<Row> rowTag = scala.reflect.ClassTag$.MODULE$.apply(Row.class);
+        Dataset<Row> df5 = spark.createDataFrame(spark.sparkContext().emptyRDD(rowTag),
+                new StructType()
+                        .add(new StructField("Column_1", DataTypes.StringType, true, Metadata.empty())));
+        df5.show(false);
+        df5.printSchema();
+        /**
+         * +--------+
+         * |Column_1|
+         * +--------+
+         * +--------+
+         *
+         * root
+         *  |-- Column_1: string (nullable = true)
+         */
+
+        // alternative-4
+        Dataset<Row> rowDataset = spark.emptyDataFrame();
+        rowDataset.show(false);
+        rowDataset.printSchema();
+        /**
+         * ++
+         * ||
+         * ++
+         * ++
+         *
+         * root
+         */
+    }
+
+    // ############################################################################################################
+    @Test
+    public void test62959466() {
+        Dataset<Row> parquet = spark.read()
+                .parquet(
+                        getClass().getResource("/parquet/plain/part-00000-4ece3595-e410-4301-aefd-431cd1debf91-c000.snappy" +
+                                ".parquet").getPath()
+                );
+        parquet.show(false);
+        /**
+         * +------+
+         * |price |
+         * +------+
+         * |123.15|
+         * +------+
+         */
+
+        StructType schema = Encoders.bean(MyData.class).schema();
+        List<String> columns = Arrays.stream(parquet.columns()).collect(Collectors.toList());
+        List<Column> columnList = JavaConverters.asJavaCollectionConverter(schema).asJavaCollection().stream()
+                .map(f -> (columns.contains(f.name())) ? col(f.name()) : lit(null).cast(f.dataType()).as(f.name()))
+                .collect(Collectors.toList());
+        Dataset<MyData> myDataDS =
+                parquet.select(JavaConverters.asScalaBufferConverter(columnList).asScala()).as(Encoders.bean(MyData.class));
+        myDataDS.show(false);
+        myDataDS.printSchema();
+        /**
+         * +----+------+
+         * |myId|price |
+         * +----+------+
+         * |null|123.15|
+         * +----+------+
+         *
+         * root
+         *  |-- myId: string (nullable = true)
+         *  |-- price: decimal(5,2) (nullable = true)
+         */
+    }
+
+    // ############################################################################################################
+    @Test
+    public void test62950949() {
+        List<Row> rows = Arrays.asList(
+                RowFactory.create("aaaa", 11),
+                RowFactory.create("aaa", 12),
+                RowFactory.create("aa", 13),
+                RowFactory.create("a", 14)
+        );
+
+        Dataset<Row> codeValudeDf = spark.createDataFrame(rows, new StructType()
+                .add("code", DataTypes.StringType, true, Metadata.empty())
+                .add("value", DataTypes.IntegerType, true, Metadata.empty()));
+        Map<String, Integer> map = new HashMap<>();
+        codeValudeDf.collectAsList().forEach(row -> map.put(row.getString(0), row.getInt(1)));
+
+        System.out.println(map.entrySet().stream().map(e -> e.getKey() +"->"+ e.getValue())
+                .collect(Collectors.joining(", ", "[ ", " ]")));
+        // [ aaa->12, aa->13, a->14, aaaa->11 ]
+    }
+
+
+
+
+
+
 
 }

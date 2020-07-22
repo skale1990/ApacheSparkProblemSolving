@@ -1,0 +1,6 @@
+dateCreated   : 20200720
+customerId    :  001
+dateCreated   : 20200720
+customerId    :  002
+dateCreated   : 20200721
+customerId    :  003
