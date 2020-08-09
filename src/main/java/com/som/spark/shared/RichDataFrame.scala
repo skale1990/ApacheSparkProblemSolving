@@ -7,7 +7,7 @@ import org.apache.spark.sql.types.{NumericType, StringType, StructField, StructT
 import scala.language.implicitConversions
 
 class RichDataFrame(ds: DataFrame) {
-  def statSummary(statistics: Seq[String]= Seq.empty): DataFrame = {
+  def statSummary(statistics: String*): DataFrame = {
     val defaultStatistics = Seq("max", "min", "mean", "std", "skewness", "kurtosis")
     val statFunctions = if (statistics.nonEmpty) statistics else defaultStatistics
     val selectedCols = ds.schema

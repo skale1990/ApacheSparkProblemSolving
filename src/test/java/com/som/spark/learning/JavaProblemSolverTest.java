@@ -3,7 +3,7 @@ package com.som.spark.learning;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableList;
-import com.twitter.chill.KryoSerializer;
+import com.vividsolutions.jts.geom.Geometry;
 import org.apache.spark.SparkContext;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
@@ -15,6 +15,7 @@ import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.ml.classification.MultilayerPerceptronClassificationModel;
 import org.apache.spark.ml.classification.MultilayerPerceptronClassifier;
 import org.apache.spark.rdd.RDD;
+import org.apache.spark.serializer.KryoSerializer;
 import org.apache.spark.sql.SparkSession;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
@@ -38,7 +39,9 @@ import org.apache.spark.sql.streaming.StreamingQuery;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.util.LongAccumulator;
 import org.datasyslab.geospark.serde.GeoSparkKryoRegistrator;
+import org.datasyslab.geospark.spatialRDD.SpatialRDD;
 import org.datasyslab.geosparksql.UDF.Catalog;
+import org.datasyslab.geosparksql.utils.Adapter;
 import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
@@ -58,6 +61,9 @@ import scala.collection.JavaConversions;
 import scala.collection.JavaConverters;
 import scala.collection.Seq;
 import scala.collection.mutable.Buffer;
+import scala.collection.mutable.WrappedArray;
+import scala.math.Ordering;
+import scala.math.Ordering$;
 import scala.reflect.ClassTag;
 
 import java.lang.reflect.Method;
@@ -66,9 +72,11 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -85,6 +93,8 @@ public class JavaProblemSolverTest implements Serializable {
             .appName("TestSuite")
             .config("spark.sql.shuffle.partitions", "2")
             .getOrCreate();
+    public static String resourceFolder = System.getProperty("user.dir") + "/src/test/resources/";
+    public static String mixedWkbGeometryInputLocation = resourceFolder + "geospark/county_small_wkb.tsv";
 
     @BeforeClass
     public void setupBeforeAllTests() {
@@ -1175,6 +1185,301 @@ public class JavaProblemSolverTest implements Serializable {
                 .collect(Collectors.joining(", ", "[ ", " ]")));
         // [ aaa->12, aa->13, a->14, aaaa->11 ]
     }
+
+    // ############################################################################################################
+    @Test
+    public void testGetUTCTimestamp() {
+        // Local - GMT+5:30
+        // GMT Date and time (GMT): Tuesday, July 28, 2020 12:00:00 AM
+        Dataset<Row> df = spark.sql("select '2020-07-28 05:30:00' as time");
+        df.show(false);
+        df.printSchema();
+        /**
+         * +-------------------+
+         * |time               |
+         * +-------------------+
+         * |2020-07-28 05:30:00|
+         * +-------------------+
+         *
+         * root
+         *  |-- time: string (nullable = false)
+         */
+        // Alternative-1
+        df.withColumn("unix", from_unixtime(unix_timestamp(col("time"), "yyyy-MM-dd HH:mm:ss")))
+                .withColumn("utc", to_utc_timestamp(
+                from_unixtime(unix_timestamp(col("time"), "yyyy-MM-dd HH:mm:ss")),
+                TimeZone.getDefault().getID()))
+                .show(false);
+        /**
+         * +-------------------+-------------------+-------------------+
+         * |time               |unix               |utc                |
+         * +-------------------+-------------------+-------------------+
+         * |2020-07-28 05:30:00|2020-07-28 05:30:00|2020-07-28 00:00:00|
+         * +-------------------+-------------------+-------------------+
+         */
+
+        // Alternative-2
+        df.withColumn("utc", to_utc_timestamp(
+                col("time"),
+                TimeZone.getDefault().getID()))
+                .show(false);
+        /**
+         * +-------------------+-------------------+
+         * |time               |utc                |
+         * +-------------------+-------------------+
+         * |2020-07-28 05:30:00|2020-07-28 00:00:00|
+         * +-------------------+-------------------+
+         */
+
+        // alternative-3
+        spark.sql("select '2020-07-28' as time")
+                .withColumn("utc", to_utc_timestamp(date_format(col("time"), "yyyy-MM-dd"),
+                        TimeZone.getDefault().getID()))
+                .show(false);
+        /**
+         * +----------+-------------------+
+         * |time      |utc                |
+         * +----------+-------------------+
+         * |2020-07-28|2020-07-27 18:30:00|
+         * +----------+-------------------+
+         */
+
+        // Convert utc timestamp to millis
+//        TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
+        spark.conf().set("spark.sql.session.timeZone", "UTC");
+        final String TimeZoneUTC = TimeZone.getTimeZone("UTC").getID();
+        Dataset<Row> rowDataset = spark.sql("select '2020-07-28' as time")
+                .withColumn("utc", to_utc_timestamp(col("time"), TimeZoneUTC))
+                .withColumn("millis", unix_timestamp(to_date(col("time"))).multiply(1000));
+        rowDataset.show(false);
+        rowDataset.printSchema();
+        /**
+         * +----------+-------------------+-------------+
+         * |time      |utc                |millis       |
+         * +----------+-------------------+-------------+
+         * |2020-07-28|2020-07-28 00:00:00|1595894400000|
+         * +----------+-------------------+-------------+
+         *
+         * root
+         *  |-- time: string (nullable = false)
+         *  |-- utc: timestamp (nullable = true)
+         *  |-- millis: long (nullable = true)
+         */
+    }
+    // ############################################################################################################
+    @Test
+    public void test63213807() {
+        Dataset<Row> df = spark.sql("select array('abc', 'ab', 'a') arr");
+        df.printSchema();
+        df.show(false);
+        /**
+         * root
+         *  |-- arr: array (nullable = false)
+         *  |    |-- element: string (containsNull = false)
+         *
+         * +------------+
+         * |arr         |
+         * +------------+
+         * |[abc, ab, a]|
+         * +------------+
+         */
+
+        // scala.collection.mutable.WrappedArray
+        UserDefinedFunction shortestStringUdf = udf((WrappedArray<String> arr)  -> {
+                    List<String> strings = new ArrayList<>(JavaConverters
+                            .asJavaCollectionConverter(arr)
+                            .asJavaCollection());
+                    strings.sort(Comparator.comparing(String::length));
+                    return strings.get(0);
+                }
+                , DataTypes.StringType);
+        spark.udf().register("shortestString", shortestStringUdf);
+
+        df.withColumn("a", expr("shortestString(arr)"))
+        .show(false);
+        /**
+         * +------------+---+
+         * |arr         |a  |
+         * +------------+---+
+         * |[abc, ab, a]|a  |
+         * +------------+---+
+         */
+
+        // spark>=2.4
+        df.withColumn("arr_length", expr("TRANSFORM(arr, x -> length(x))"))
+                .withColumn("a", expr("array_sort(arrays_zip(arr_length, arr))[0].arr"))
+                .show(false);
+        /**
+         * +------------+----------+---+
+         * |arr         |arr_length|a  |
+         * +------------+----------+---+
+         * |[abc, ab, a]|[3, 2, 1] |a  |
+         * +------------+----------+---+
+         */
+    }
+    // ############################################################################################################
+    @Test
+    public void test63241916() {
+        String data = "Column_1 Column_2\n" +
+                "A        2020-08-05\n" +
+                "D        2020-08-01\n" +
+                "D        2020-08-02\n" +
+                "B        2020-08-01\n" +
+                "B        2020-09-20\n" +
+                "B        2020-12-31\n" +
+                "C        2020-05-10";
+
+        List<String> list1 = Arrays.stream(data.split(System.lineSeparator()))
+                .map(s -> Arrays.stream(s.split("\\s+"))
+                        .map(s1 -> s1.replaceAll("^[ \t]+|[ \t]+$", ""))
+                        .collect(Collectors.joining(","))
+                )
+                .collect(Collectors.toList());
+
+        Dataset<Row> dataset = spark.read()
+                .option("header", true)
+//                .option("inferSchema", true)
+                .option("sep", ",")
+                .option("nullValue", "null")
+                .csv(spark.createDataset(list1, Encoders.STRING()));
+        dataset.show(false);
+        dataset.printSchema();
+        /**
+         *+--------+----------+
+         * |Column_1|Column_2  |
+         * +--------+----------+
+         * |A       |2020-08-05|
+         * |D       |2020-08-01|
+         * |D       |2020-08-02|
+         * |B       |2020-08-01|
+         * |B       |2020-09-20|
+         * |B       |2020-12-31|
+         * |C       |2020-05-10|
+         * +--------+----------+
+         *
+         * root
+         *  |-- Column_1: string (nullable = true)
+         *  |-- Column_2: string (nullable = true)
+         */
+
+        dataset.withColumn("Column_2", to_date(col("Column_2")))
+                .withColumn("count", count("Column_2").over(Window.partitionBy("Column_1")))
+                .withColumn("positive", when(col("count").gt(1),
+                        when(col("Column_2").gt(current_date()), col("Column_2"))
+                ).otherwise(col("Column_2")))
+                .withColumn("negative", when(col("count").gt(1),
+                        when(col("Column_2").lt(current_date()), col("Column_2"))
+                ).otherwise(col("Column_2")))
+                .groupBy("Column_1")
+                .agg(min("positive").as("positive"), max("negative").as("negative"))
+                .selectExpr("Column_1", "coalesce(positive, negative) as Column_2")
+                .show(false);
+        /**
+         * +--------+----------+
+         * |Column_1|Column_2  |
+         * +--------+----------+
+         * |A       |2020-08-05|
+         * |D       |2020-08-02|
+         * |B       |2020-09-20|
+         * |C       |2020-05-10|
+         * +--------+----------+
+         */
+    }
+    // ############################################################################################################
+    @Test
+    public void test63280529() {
+        SparkSession sparkSession = SparkSession.builder()
+                .config("spark.serializer", KryoSerializer.class.getName())
+                .config("spark.kryo.registrator", GeoSparkKryoRegistrator.class.getName())
+                .master("local[*]")
+                .appName("myGeoSparkSQLdemo")
+                .getOrCreate();
+
+        // register all functions from geospark-sql_2.3 to sparkSession
+        GeoSparkSQLRegistrator.registerAll(sparkSession);
+        Dataset<Row> dataset = sparkSession.sql("select cast(bin(178) as binary) as bin");
+        dataset.show(false);
+        dataset.printSchema();
+
+        dataset.selectExpr("hex(bin)").show(false);
+
+        Dataset<Row> df1 = new ProblemSolverAug2020Test().getBinaryDF();
+        df1.show(false);
+        df1.printSchema();
+
+        Dataset<Row> binaryGeometry = df1.withColumn("BinaryGeometry",
+                expr("cast(BinaryGeometry as string)"));
+        binaryGeometry.show(false);
+        binaryGeometry.printSchema();
+//
+//        df.withColumn("BinaryGeometry",expr("ST_GeomFromWKB(bin(BinaryGeometry))"))
+//                .show(false);
+        Dataset<Row> df = sparkSession.read().format("csv").option("delimiter", "\t").option("header", "false").load(mixedWkbGeometryInputLocation);
+        df.show();
+        df.printSchema();
+        df.createOrReplaceTempView("inputtable");
+        Dataset<Row> spatialDf = sparkSession.sql("select ST_GeomFromWKB(inputtable._c0) as usacounty from inputtable");
+        spatialDf.show();
+        spatialDf.printSchema();
+        SpatialRDD spatialRDD = new SpatialRDD<Geometry>();
+        spatialRDD.rawSpatialRDD = Adapter.toSpatialRdd(spatialDf).rawSpatialRDD;
+        spatialRDD.analyze();
+        Adapter.toDf(spatialRDD, sparkSession).show();
+
+    }
+    // ############################################################################################################
+    @Test
+    public void test63322170() {
+        String data = " ID   |location| posteddate        \n" +
+                "137570|chennai |2020-06-22 13:49:00\n" +
+                "137571| kerala |2020-02-22 14:49:00\n" +
+                "137572|chennai |2018-10-26 13:19:00\n" +
+                "137573|chennai |2019-09-29 14:49:00";
+        List<String> list1 = Arrays.stream(data.split(System.lineSeparator()))
+                .map(s -> Arrays.stream(s.split("\\|"))
+                        .map(s1 -> s1.replaceAll("^[ \t]+|[ \t]+$", ""))
+                        .collect(Collectors.joining(","))
+                )
+                .collect(Collectors.toList());
+
+        Dataset<Row> dataset = spark.read()
+                .option("header", true)
+                .option("inferSchema", true)
+                .option("sep", ",")
+                .option("nullValue", "null")
+                .csv(spark.createDataset(list1, Encoders.STRING()));
+        dataset.show(false);
+        dataset.printSchema();
+        /**
+         * +------+--------+-------------------+
+         * |ID    |location|posteddate         |
+         * +------+--------+-------------------+
+         * |137570|chennai |2020-06-22 13:49:00|
+         * |137571|kerala  |2020-02-22 14:49:00|
+         * |137572|chennai |2018-10-26 13:19:00|
+         * |137573|chennai |2019-09-29 14:49:00|
+         * +------+--------+-------------------+
+         *
+         * root
+         *  |-- ID: integer (nullable = true)
+         *  |-- location: string (nullable = true)
+         *  |-- posteddate: timestamp (nullable = true)
+         */
+
+        dataset.withColumn("yearquarter", expr("concat('Q', quarter(posteddate), year(posteddate))"))
+                .show(false);
+        /**
+         * +------+--------+-------------------+-----------+
+         * |ID    |location|posteddate         |yearquarter|
+         * +------+--------+-------------------+-----------+
+         * |137570|chennai |2020-06-22 13:49:00|Q22020     |
+         * |137571|kerala  |2020-02-22 14:49:00|Q12020     |
+         * |137572|chennai |2018-10-26 13:19:00|Q42018     |
+         * |137573|chennai |2019-09-29 14:49:00|Q32019     |
+         * +------+--------+-------------------+-----------+
+         */
+    }
+
 
 
 
