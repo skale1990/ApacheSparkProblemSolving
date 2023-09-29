@@ -15,7 +15,7 @@
         <scala.version>2.11.8</scala.version>
         <spark.version>2.4.5</spark.version>
         <spark.scala.version>2.11</spark.scala.version>
-        <avro.version>1.9.0</avro.version>
+        <avro.version>1.11.3</avro.version>
         <testng.version>6.8.8</testng.version>
     </properties>
     <dependencies>
